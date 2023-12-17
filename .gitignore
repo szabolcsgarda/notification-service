@@ -19,3 +19,7 @@
 
 # Go workspace file
 go.work
+/local.env
+/.idea/modules.xml
+/.idea/notification-service.iml
+/.idea/vcs.xml
