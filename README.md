@@ -5,6 +5,11 @@ This is a Go application that provides a JWT authenticated REST API for clients 
 it possible for them to receive notifications in near-real-time from any service in the
 cloud architecture.
 
+### Use cases
+Has been designed for a mobile application, to avoid extensive usage of push notifications or websocket connections. The service can be deployed beside any other API
+service, preferably behind a load balancer. It can be handy for any mobile application where real-time notifications must be delivered while the 
+application is in active state, for long-running IoT software or for browser applications.
+
 ### How it works
 The service receives the notification from a dedicated AWS SQS queue and delivers it immediately to
 the client if it is connected. If the addressee client in not connected, or the delivery
@@ -27,11 +32,6 @@ service wants to send a message to client 'A', it needs to know exactly which no
 That's when the database comes into play. When a client connects to an instance of the notification-service, the service assigns its 
 unique ID to the client and stores it in the database. When a message generator service wants to send a message to client 'A', it needs to 
 retrieve the corresponding notification-service ID from the database and send the message to the corresponding SQS queue.
-
-## Use cases
-Has been designed for a mobile application, to avoid extensive usage of push notifications or websocket connections. The service can be deployed beside any other API
-service, preferably behind a load balancer. It can be handy for any mobile application where real-time notifications must be delivered while the 
-application is in active state, for long-running IoT software or for browser applications.
 
 ## Features
 <b>JWT Authentication:</b> User authentication is based on JWT tokens.
