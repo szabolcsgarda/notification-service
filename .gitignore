@@ -23,3 +23,4 @@ go.work
 /.idea/modules.xml
 /.idea/notification-service.iml
 /.idea/vcs.xml
+/.idea/.gitignore

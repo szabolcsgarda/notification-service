@@ -1,21 +1,36 @@
 # REST long-polling microservice for near-real-time notification delivery
 
 ## Introduction
-The REST long-polling microservice for near-real-time notification delivery is a
-Go application that provides a JWT authenticated REST API for clients and makes
+This is a Go application that provides a JWT authenticated REST API for clients and makes
 it possible for them to receive notifications in near-real-time from any service in the
 cloud architecture.
+
+### How it works
 The service receives the notification from a dedicated AWS SQS queue and delivers it immediately to
 the client if it is connected. If the addressee client in not connected, or the delivery
-was not successful for whatever reason, the notification will stay in the SQS queue. The
-service will retry the delivery only if the SQS policy set to deliver it again for listerner.
+was not successful for whatever reason, the notification will not be deleted from the queue and if SQS
+configured so, it will go to a dead-letter-queue. The service will retry the delivery only if the SQS policy set to deliver 
+it again for listener.
+
+### Deployment
 The service can be deployed in a highly scalable and highly available manner.
 The service uses a database to store client sessions, currently it is running on PostgrepSQL (
 DynamoDB or Redis are also good fits)
 
+### Authentication
+The service supports JWT authentication. JWT tokens are expected in the "Authorization" header of the request,
+the URL to the jwks.json file must be provided as an environment variable.
+
+### Session Management
+Each instance of the application receives deliverable messages from a dedicated SQS queue. It means, that if a message generator
+service wants to send a message to client 'A', it needs to know exactly which notification-service instance A is currently connected to.
+That's when the database comes into play. When a client connects to an instance of the notification-service, the service assigns its 
+unique ID to the client and stores it in the database. When a message generator service wants to send a message to client 'A', it needs to 
+retrieve the corresponding notification-service ID from the database and send the message to the corresponding SQS queue.
+
 ## Use cases
-Has been designed for a mobile application, to avoid extensive usage of push notifications or websocket connections. The serviice can be deployed beside any other API
-service, preferably behind a load balancer. It can be handy for any mobile application where real-time notifications must be delived while the 
+Has been designed for a mobile application, to avoid extensive usage of push notifications or websocket connections. The service can be deployed beside any other API
+service, preferably behind a load balancer. It can be handy for any mobile application where real-time notifications must be delivered while the 
 application is in active state, for long-running IoT software or for browser applications.
 
 ## Features
@@ -61,7 +76,7 @@ docker build -t notification-service -f Dockerfile-dev .
 docker run -p 3000:3000 -e DB_HOST="your-db-host" notification-service
 ```
 ## API documentation
-See /openapi/notification-service.yaml for details!
+See /api/notification-service.yaml for details!
 
 ## Environmental variables
 The following environment variables are used by the application:
