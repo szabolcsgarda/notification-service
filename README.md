@@ -59,7 +59,7 @@ docker build -t notification-service -f Dockerfile-dev .
    and credentials. Also recommended to use AWS role-based permissions.
 ```
 docker run -p 3000:3000 -e DB_HOST="your-db-host" notification-service
-
+```
 ## API documentation
 See /openapi/notification-service.yaml for details!
 
