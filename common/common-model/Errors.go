@@ -5,7 +5,7 @@ import (
 	"go.uber.org/zap"
 )
 
-var zLog, _ = zap.NewDevelopment()
+var _, _ = zap.NewDevelopment()
 
 var ErrDbUnexpected = errors.New("ERROR_DB_UNEXPECTED_ERROR")
 var ErrInvalidBody = errors.New("INVALID_REQUEST_BODY")
