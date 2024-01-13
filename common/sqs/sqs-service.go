@@ -20,10 +20,6 @@ type SqsService struct {
 	//Todo: add some kind of circuit breaker logic, to avoid infinite high frequency retrying in case of network issues
 }
 
-type SqsMessage struct {
-	Message string
-}
-
 type SqsServiceInterface interface {
 	SendMessageToQueue(queueUrl string, message string, messageAttributes *map[string]interface{}) (messageId *string, err error)
 	ReceiveMessage(done *chan interface{}, c *chan sqs.Message, queueUrl *string, visibilityTimeout int64) (err error)

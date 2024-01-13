@@ -93,7 +93,7 @@ See /api/notification-service.yaml for details!
 ## Environmental variables
 The following environment variables are used by the application:
 
-| Variable Name                     | Description                             |Required   |Default Value    |
+| Variable Name                     | Description                             |Required   | Default Value   |
 |-----------------------------------|-----------------------------------------|-----------|-----------------|
 | `PORT`                            | REST API port                           | No        | 8080            |
 | `SQS_QUEUE_NAME_PREFIX`           | Prefix of the SQS queue                 | Yes       | -               |
@@ -105,3 +105,5 @@ The following environment variables are used by the application:
 | `DB_PASSWORD`                     | Database password                       | No        | my_password     |
 | `DB_NAME`                         | Database name                           | No        | message_service |
 | `LOGGING_MODE`                    | Logging mode for zap logger             | No        | DEVELOPMENT     |
+| `SQS_USER_QUEUE_BASE_URL`         | Base queue URL in case of mode 2        | No        | -               |
+| `NOTIFICATION_SERVICE_MODE`         | Specify operation mode (1 or 2)         | No        | 1               |

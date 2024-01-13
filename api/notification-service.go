@@ -26,6 +26,8 @@ type NotificationService struct {
 	queueUrl          *string
 	receiveMessage    chan awssqs.Message
 	doneChannel       chan interface{}
+	operationMode     commonmodel.OperationMode
+	userQueueBaseUrl  *string
 }
 
 func NewNotificationService(factory factory.FactoryInterface) *NotificationService {
@@ -42,15 +44,20 @@ func NewNotificationService(factory factory.FactoryInterface) *NotificationServi
 	}
 	//Create the queue if the uuid was not provided, if it was then expect that the url is provided too and do not create the queue again
 	var queueUrl *string
-	if uuidProvidedStr := common.GetEnvWithDefault("NOTIFICATION_SERVICE_CLIENT_ID", ""); uuidProvidedStr != "" {
-		uuidProvided, _ = uuid.Parse(uuidProvidedStr)
-		queueUrl = common.GetStringPointer(common.GetEnvRequired("SQS_QUEUE_URL"))
-	} else {
-		queueName := common.GetEnvRequired("SQS_QUEUE_NAME_PREFIX") + "-" + uuidProvided.String()
-		queueUrl, err = factory.Sqs().CreateMessageQueue(queueName, nil, nil, nil, nil)
-		if err != nil {
-			log.Fatal("Error while creating queue", zap.Any("error", err))
+	var userQueueBaseUrl *string
+	if factory.Mode() == commonmodel.ServiceInstanceQueue {
+		if uuidProvidedStr := common.GetEnvWithDefault("NOTIFICATION_SERVICE_CLIENT_ID", ""); uuidProvidedStr != "" {
+			uuidProvided, _ = uuid.Parse(uuidProvidedStr)
+			queueUrl = common.GetStringPointer(common.GetEnvRequired("SQS_QUEUE_URL"))
+		} else {
+			queueName := common.GetEnvRequired("SQS_QUEUE_NAME_PREFIX") + "-" + uuidProvided.String()
+			queueUrl, err = factory.Sqs().CreateMessageQueue(queueName, nil, nil, nil, nil)
+			if err != nil {
+				log.Fatal("Error while creating queue", zap.Any("error", err))
+			}
 		}
+	} else if factory.Mode() == commonmodel.UserQueue {
+		userQueueBaseUrl = common.GetStringPointer(common.GetEnvRequired("SQS_USER_QUEUE_BASE_URL"))
 	}
 	service := NotificationService{
 		F:                 factory,
@@ -63,12 +70,16 @@ func NewNotificationService(factory factory.FactoryInterface) *NotificationServi
 		queueUrl:          queueUrl,
 		receiveMessage:    make(chan awssqs.Message),
 		doneChannel:       make(chan interface{}),
+		operationMode:     factory.Mode(),
+		userQueueBaseUrl:  userQueueBaseUrl,
 	}
 
-	//Subscribe to the queue
-	errSubscribe := service.sqs.ReceiveMessage(&service.doneChannel, &service.receiveMessage, service.queueUrl, 15)
-	if errSubscribe != nil {
-		service.zLog.Fatal("Error while subscribing to the queue", zap.Any("error", errSubscribe))
+	//Subscribe to the service instance queue
+	if factory.Mode() == commonmodel.ServiceInstanceQueue {
+		errSubscribe := service.sqs.ReceiveMessage(&service.doneChannel, &service.receiveMessage, service.queueUrl, 15)
+		if errSubscribe != nil {
+			service.zLog.Fatal("Error while subscribing to the queue", zap.Any("error", errSubscribe))
+		}
 	}
 
 	//Start handler for incoming messages
@@ -138,13 +149,30 @@ func (s NotificationService) GetNotificationSubscribe(c *gin.Context) {
 		return
 	}
 	client := tokenParsed["sub"].(string)
+	sessionClosed := make(chan interface{})
 
-	//Assign the service ID to the client in the database
-	err := s.d.UpdateClientServiceId(client, s.serviceInstanceId)
-	if err != nil {
-		s.zLog.Error("Error while assigning service ID to client", zap.String("trace-id:", c.GetHeader("trace-id")), zap.Any("error", err))
-		c.Status(500)
-		return
+	//Create dedicated channel for this client
+	sessionChannel := make(chan string)
+	s.sessions[client] = sessionChannel
+
+	if s.operationMode == commonmodel.ServiceInstanceQueue {
+		//Assign the service ID to the client in the database
+		err := s.d.UpdateClientServiceId(client, s.serviceInstanceId)
+		if err != nil {
+			s.zLog.Error("Error while assigning service ID to client", zap.String("trace-id:", c.GetHeader("trace-id")), zap.Any("error", err))
+			s.sessions[client] = nil
+			c.Status(500)
+			return
+		}
+	} else if s.operationMode == commonmodel.UserQueue {
+		//Subscribe to the user queue
+		errSubscribe := s.sqs.ReceiveMessage(&sessionClosed, &s.receiveMessage, getUserQueueUrl(*s.userQueueBaseUrl, client), 15)
+		if errSubscribe != nil {
+			s.zLog.Error("Error while subscribing to the queue", zap.Any("error", errSubscribe))
+			s.sessions[client] = nil
+			c.Status(500)
+			return
+		}
 	}
 
 	//Set up headers and flush it immediately to let client know that connection is established
@@ -152,10 +180,6 @@ func (s NotificationService) GetNotificationSubscribe(c *gin.Context) {
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Flush()
-
-	//Create dedicated channel for this client
-	sessionChannel := make(chan string)
-	s.sessions[client] = sessionChannel
 
 	//Set up timeout and terminate connection in case it happens
 	timeoutChannel := make(chan interface{})
@@ -166,21 +190,14 @@ func (s NotificationService) GetNotificationSubscribe(c *gin.Context) {
 
 	//Start listening events and also monitor the closeNotify channel
 	for {
+	selectLoop:
 		select {
 		case <-closeNotify:
-			close(sessionChannel)
-			delete(s.sessions, client)
-			err := s.d.UpdateClientServiceIdToNull(client)
-			if err != nil {
-				s.zLog.Error("Error while removing service ID from client", zap.String("trace-id:", c.GetHeader("trace-id")), zap.Any("error", err))
-			}
 			s.zLog.Debug("HTTP connection just closed", zap.String("trace-id:", c.GetHeader("trace-id")))
-			return
+			break selectLoop
 		case <-timeoutChannel:
-			close(sessionChannel)
-			delete(s.sessions, client)
 			s.zLog.Debug("Connection timed out", zap.String("trace-id:", c.GetHeader("trace-id")))
-			return
+			break selectLoop
 		case sessionMessage := <-sessionChannel:
 			s.zLog.Debug("Sending message to client", zap.String("trace-id:", c.GetHeader("trace-id")), zap.Any("message", sessionMessage))
 			_, err := c.Writer.WriteString(sessionMessage)
@@ -190,4 +207,18 @@ func (s NotificationService) GetNotificationSubscribe(c *gin.Context) {
 			c.Writer.Flush()
 		}
 	}
+	if s.operationMode == commonmodel.ServiceInstanceQueue {
+		err := s.d.UpdateClientServiceIdToNull(client)
+		if err != nil {
+			s.zLog.Error("Error while removing service ID from client", zap.String("trace-id:", c.GetHeader("trace-id")), zap.Any("error", err))
+		}
+	} else if s.operationMode == commonmodel.UserQueue {
+		sessionClosed <- true
+	}
+	close(sessionChannel)
+	delete(s.sessions, client)
+}
+
+func getUserQueueUrl(baseUrl, userId string) (queueUrl *string) {
+	return common.GetStringPointer(baseUrl + "-" + userId)
 }
