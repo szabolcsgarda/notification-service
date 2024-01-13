@@ -106,4 +106,4 @@ The following environment variables are used by the application:
 | `DB_NAME`                         | Database name                           | No        | message_service |
 | `LOGGING_MODE`                    | Logging mode for zap logger             | No        | DEVELOPMENT     |
 | `SQS_USER_QUEUE_BASE_URL`         | Base queue URL in case of mode 2        | No        | -               |
-| `NOTIFICATION_SERVICE_MODE`         | Specify operation mode (1 or 2)         | No        | 1               |
+| `NOTIFICATION_SERVICE_MODE`       | Specify operation mode (0 or 1)         | No        | 0               |
