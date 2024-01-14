@@ -58,7 +58,7 @@ cd notification-service
 ```
 
 ### Deployment on your machine
-13. Install dependencies
+1. Install dependencies
 ```
 go install
 ```
