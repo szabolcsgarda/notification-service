@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"go.uber.org/zap"
+	"notification-service/common/common"
 	model "notification-service/common/common-model"
 	"notification-service/common/logging"
 	"strings"
@@ -17,12 +18,12 @@ const ErrorInvalidJwt = "ERROR_INVALID_JWT"
 const ErrorInvalidSignature = "ERROR_INVALID_SIGNATURE"
 const ErrorTokenExpired = "ERROR_TOKEN_EXPIRED"
 const ErrorTokenProcessable = "ERROR_TOKEN_PROCESSABLE"
-const ErrorInvalidApiKey = "ErrorInvalidApiKey"
 
 func init() {
 	zLog = *logging.Logger()
 }
 
+// Authorization is an object type that contains all objects to manage JWT and token-based authentication
 type Authorization struct {
 	jwkAuthEnabled   bool
 	apiKeyAutEnabled bool
@@ -38,6 +39,7 @@ type AuthorizationInterface interface {
 	ParseJWTPayloadGin(c *gin.Context) (result jwt.MapClaims, err error)
 }
 
+// CreateAuthorization is a factory function that creates a new Authorization instance
 func CreateAuthorization(environment string, jwkAuthEnabled bool, jwkUrl string) (auth *Authorization) {
 	auth = &Authorization{
 		jwkAuthEnabled: jwkAuthEnabled,
@@ -52,6 +54,7 @@ func CreateAuthorization(environment string, jwkAuthEnabled bool, jwkUrl string)
 	return
 }
 
+// UpdateJwks updates the JWKs from the given URL (tested with AWS cognito)
 func (auth *Authorization) UpdateJwks() {
 	if len(auth.jwkUrl) == 0 {
 		zLog.Fatal("Cannot retrieve JWK before providing its URL")
@@ -64,7 +67,8 @@ func (auth *Authorization) UpdateJwks() {
 	}
 }
 
-// JwtAuthorizationHandler JWT validation for Gin Router
+// JwtAuthorizationHandlerGin JWT validation for Gin Router
+// Returns with error and terminates the connection if the JWT is invalid
 func (auth *Authorization) JwtAuthorizationHandlerGin(c *gin.Context) {
 	if !auth.jwkAuthEnabled {
 		errMsg := model.ModelError{Error_: ErrorInvalidJwt, Message: "invalid JWT"}
@@ -83,11 +87,8 @@ func (auth *Authorization) JwtAuthorizationHandlerGin(c *gin.Context) {
 			return
 		} else {
 			if errors.Is(err, jwt.ErrTokenMalformed) {
-				errMsg := model.ModelError{Error_: ErrorInvalidJwt,
-					Message: "invalid JWT"}
 				zLog.Info(ErrorInvalidJwt, zap.String("trace-id", c.GetHeader("trace-id")))
-				c.JSON(401, errMsg)
-				return
+				common.ErrorResponse(c, 401, ErrorInvalidJwt, "Invalid JWT", c.GetHeader("trace-id"))
 			} else if errors.Is(err, jwt.ErrTokenSignatureInvalid) {
 				//JWT might be outdated, retry after updating JWT
 				if !jwtPulled {
@@ -95,29 +96,22 @@ func (auth *Authorization) JwtAuthorizationHandlerGin(c *gin.Context) {
 					auth.UpdateJwks()
 					continue
 				}
-				errMsg := model.ModelError{Error_: ErrorInvalidSignature,
-					Message: "invalid JWT"}
 				zLog.Info(ErrorInvalidSignature, zap.String("trace-id", c.GetHeader("trace-id")))
-				c.JSON(401, errMsg)
-				return
+				common.ErrorResponse(c, 401, ErrorInvalidSignature, "Invalid JWT signature", c.GetHeader("trace-id"))
 			} else if errors.Is(err, jwt.ErrTokenExpired) || errors.Is(err, jwt.ErrTokenNotValidYet) {
-				errMsg := model.ModelError{Error_: ErrorTokenExpired,
-					Message: "invalid JWT"}
 				zLog.Info(ErrorTokenExpired, zap.String("trace-id", c.GetHeader("trace-id")))
-				c.JSON(401, errMsg)
-				return
+				common.ErrorResponse(c, 401, ErrorTokenExpired, "Token expired", c.GetHeader("trace-id"))
 			} else {
-				errMsg := model.ModelError{Error_: ErrorTokenProcessable,
-					Message: "invalid JWT"}
 				zLog.Info(ErrorTokenProcessable, zap.String("trace-id", c.GetHeader("trace-id")))
-				c.JSON(401, errMsg)
-				return
+				common.ErrorResponse(c, 401, ErrorTokenProcessable, "Invalid JWT", c.GetHeader("trace-id"))
 			}
+			return
 		}
 	}
 
 }
 
+// ParseJWTPayloadGin parses the JWT payload from the given Gin context and returns a jwt.MapClaims object
 func (auth *Authorization) ParseJWTPayloadGin(c *gin.Context) (result jwt.MapClaims, err error) {
 	tokenStr := c.GetHeader("Authorization")
 	tokenStr = strings.Replace(tokenStr, "Bearer ", "", -1)

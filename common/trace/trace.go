@@ -8,6 +8,7 @@ import (
 	"notification-service/common/common"
 )
 
+// TraceMiddleware is a middleware to generate traceId for each incoming request (if it doesn't have) and log it
 type TraceMiddleware struct {
 	TracingHeaderParameter string
 	Environment            string
@@ -24,6 +25,7 @@ type TraceMiddlewareInterface interface {
 	LogIncomingRequestGin(c *gin.Context)
 }
 
+// EnsureTracingGin ensures that each incoming request has a traceId
 func (t *TraceMiddleware) EnsureTracingGin(c *gin.Context) {
 	traceId := c.GetHeader(t.TracingHeaderParameter)
 	if traceId == "" {
@@ -33,6 +35,7 @@ func (t *TraceMiddleware) EnsureTracingGin(c *gin.Context) {
 	c.Next()
 }
 
+// LogIncomingRequestGin logs the incoming request while restricts sensitive data
 func (t *TraceMiddleware) LogIncomingRequestGin(c *gin.Context) {
 	restrictedBody := ""
 	restrictedHeader := ""

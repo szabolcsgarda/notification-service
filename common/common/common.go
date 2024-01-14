@@ -3,7 +3,9 @@ package common
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/gin-gonic/gin"
 	"net/http"
+	commonmodel "notification-service/common/common-model"
 	"os"
 	"regexp"
 )
@@ -31,6 +33,7 @@ const (
 	Header
 )
 
+// RestrictRequestJson replaces sensitive values in the request body with "RESTRICTED"
 func RestrictRequestJson(body string, jsonType JsonType) string {
 	// List of sensitive keys
 	sensitiveBodyKeys := []string{"password", "token", "secret"}
@@ -50,6 +53,7 @@ func RestrictRequestJson(body string, jsonType JsonType) string {
 	return body
 }
 
+// GetGinHeaderAsString returns the request headers as a JSON string
 func GetGinHeaderAsString(req *http.Request) string {
 	// Get the headers from the request
 	headers := req.Header
@@ -72,6 +76,17 @@ func GetGinHeaderAsString(req *http.Request) string {
 		return "could not convert"
 	}
 	return string(headerJSON)
+}
+
+// ErrorResponse contructs and send an error response to the client with the given parameters and response code
+func ErrorResponse(c *gin.Context, code int, err, message, context string) {
+	response := commonmodel.ModelError{
+		Error_:  err,
+		Message: message,
+		Context: context,
+	}
+	c.JSON(code, response)
+	c.Abort()
 }
 
 func GetStringPointer(value string) *string {
