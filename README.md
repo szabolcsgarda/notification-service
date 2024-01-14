@@ -21,13 +21,13 @@ The drawback and limitation of this approach is that it requires a database, whe
 The sender applications needs select the SQS topic accordingly. 
 This solution is recommended for prototyping, or if we want to keep the number of SQS queues low and also the number of notifications we want to deliver is not too high, since 
 due to the database operations it is scalable only to a certain extent.
-![service-queue-flow.png](service-queue-flow.png)
+![service-queue-flow.png](figures/service-queue-flow.png)
 2. <b>Dedicated SQS queue for each client:</b> We utilize the fact that basically in all applications each client (user) has a unique ID, which can be used to create 
 a dedicated SQS queue for each client. When the user connects to an instance of the notification service, the service will start to consume the notifications from the dedicated SQS queue.
 The approach does not require any database, the notification publisher service only needs to publish the notification to the corresponding SQS queue, which can be derived from the UUID of the client.
 It is recommended to move the messages from each SQS queue to a DLQ after a predefined amount of time and optionally deliver it via email or push notification service. If the messages persist
 in the queue for an unlimited amount of time, you risk that client will receive high number of notifications at once when it connects to the notification service after a longer offline period.
-![user-queue-flow.png](user-queue-flow.png)
+![user-queue-flow.png](figures/user-queue-flow.png)
 
 ### Deployment
 The service can be deployed in a highly scalable and highly available manner.
