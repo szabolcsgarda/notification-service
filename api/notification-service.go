@@ -2,7 +2,6 @@ package api
 
 import (
 	"errors"
-	awssqs "github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -11,10 +10,15 @@ import (
 	sqs "notification-service/common/sqs"
 	"notification-service/database"
 	"notification-service/factory"
+	"notification-service/model"
 	"strconv"
 	"time"
 )
 
+const ErrorInvalidJwt = "ERROR_INVALID_JWT"
+const ErrorInternalServerError = "ERROR_INTERNAL_SERVER_ERROR"
+
+// NotificationService is an object type that implements all the functionalities to handle incoming messages and deliver them to the addressee
 type NotificationService struct {
 	F                 factory.FactoryInterface
 	zLog              zap.Logger
@@ -24,12 +28,13 @@ type NotificationService struct {
 	maxTimeoutSeconds int
 	serviceInstanceId string
 	queueUrl          *string
-	receiveMessage    chan awssqs.Message
+	receiveMessage    chan model.NotificationMeta
 	doneChannel       chan interface{}
 	operationMode     commonmodel.OperationMode
 	userQueueBaseUrl  *string
 }
 
+// NewNotificationService is a factory function that creates a new NotificationService instance
 func NewNotificationService(factory factory.FactoryInterface) *NotificationService {
 	var uuidProvided = uuid.UUID{}
 	if uuidProvidedStr := common.GetEnvWithDefault("NOTIFICATION_SERVICE_CLIENT_ID", ""); uuidProvidedStr != "" {
@@ -68,7 +73,7 @@ func NewNotificationService(factory factory.FactoryInterface) *NotificationServi
 		maxTimeoutSeconds: timeout,
 		serviceInstanceId: uuidProvided.String(),
 		queueUrl:          queueUrl,
-		receiveMessage:    make(chan awssqs.Message),
+		receiveMessage:    make(chan model.NotificationMeta),
 		doneChannel:       make(chan interface{}),
 		operationMode:     factory.Mode(),
 		userQueueBaseUrl:  userQueueBaseUrl,
@@ -76,7 +81,7 @@ func NewNotificationService(factory factory.FactoryInterface) *NotificationServi
 
 	//Subscribe to the service instance queue
 	if factory.Mode() == commonmodel.ServiceInstanceQueue {
-		errSubscribe := service.sqs.ReceiveMessage(&service.doneChannel, &service.receiveMessage, service.queueUrl, 15)
+		errSubscribe := service.sqs.ReceiveNotification(&service.doneChannel, &service.receiveMessage, service.queueUrl, 15)
 		if errSubscribe != nil {
 			service.zLog.Fatal("Error while subscribing to the queue", zap.Any("error", errSubscribe))
 		}
@@ -87,23 +92,23 @@ func NewNotificationService(factory factory.FactoryInterface) *NotificationServi
 		for {
 			select {
 			case <-service.doneChannel:
-				service.zLog.Debug("Done message caught... Stopping handler function receiving messages")
-			case message := <-service.receiveMessage:
-				err := service.HandleIncomingNotification(message)
+				service.zLog.Debug("Done notification caught... Stopping handler function receiving messages")
+			case notification := <-service.receiveMessage:
+				err := service.HandleIncomingNotification(notification)
 				needToBeDeleted := false
 				if err == nil {
 					needToBeDeleted = true
 				} else {
-					service.zLog.Error("Error while handling incoming message", zap.String("message_id", *message.MessageId), zap.Any("error", err))
+					service.zLog.Error("Error while handling incoming notification", zap.String("message_id", notification.Notification.Id), zap.Any("error", err))
 					if errors.Is(err, commonmodel.ErrSqsInvalidMessage) {
 						needToBeDeleted = true
 					}
 				}
 				if needToBeDeleted {
-					// Delete the message from the queue
-					err = service.sqs.DeleteMessage(*service.queueUrl, *message.ReceiptHandle)
+					// Delete the notification from the queue
+					err = service.sqs.DeleteMessage(notification.QueueUrl, notification.ReceiptHandle)
 					if err != nil {
-						service.zLog.Error("Error while deleting message from the queue", zap.String("message_id", *message.MessageId), zap.Any("error", err))
+						service.zLog.Error("Error while deleting notification from the queue", zap.String("message_id", notification.Notification.Id), zap.Any("error", err))
 					}
 				}
 			}
@@ -113,25 +118,18 @@ func NewNotificationService(factory factory.FactoryInterface) *NotificationServi
 	return &service
 }
 
-func (s NotificationService) HandleIncomingNotification(message awssqs.Message) (err error) {
-	userMessage := *message.Body
-	if message.MessageAttributes == nil || len(message.MessageAttributes) == 0 {
-		s.zLog.Error("No message attributes provided, cannot be delivered", zap.String("message_id", *message.MessageId), zap.Any("message", message))
-		return commonmodel.ErrSqsInvalidMessage
-	}
-	addressee := message.MessageAttributes["addressee"].StringValue
-	if addressee == nil {
-		s.zLog.Error("No addressee provided, cannot be delivered", zap.String("message_id", *message.MessageId), zap.Any("message", message))
-		return commonmodel.ErrSqsInvalidMessage
-	}
+// HandleIncomingNotification handles incoming awssqs.Message objects, received from different SQS queues
+// The function validates the message and if it is valid, forwards it to the corresponding client through a dedicated channel
+// All message is deleted from the queue after delivery, or if it is formally invalid, however it is kept in case of delivery failure
+func (s NotificationService) HandleIncomingNotification(notification model.NotificationMeta) (err error) {
 
 	// Request checked, performing delivery if the addressee is connected
-	if channel, ok := s.sessions[*addressee]; ok {
-		channel <- userMessage
+	if channel, ok := s.sessions[notification.Notification.Addressee]; ok {
+		channel <- notification.Notification.Body
 	} else {
-		s.zLog.Debug("User not connected, message not delivered", zap.String("message_id", *message.MessageId))
+		s.zLog.Debug("User not connected, notification not delivered", zap.String("message_id", notification.Notification.Id))
 		//Message is valid and addressee is provided, however we could not deliver it, possible addressee disconnected, thus
-		//we do not delete the message from the queue here, we let it reach the dead-letter-queue, so an alternative way of delivery
+		//we do not delete the notification from the queue here, we let it reach the dead-letter-queue, so an alternative way of delivery
 		//will be possible (e.g.: push notifications
 		return commonmodel.ErrLongPollingCouldNotDeliver
 	}
@@ -145,7 +143,7 @@ func (s NotificationService) GetNotificationSubscribe(c *gin.Context) {
 	tokenParsed, errToken := s.F.Auth().ParseJWTPayloadGin(c)
 	if errToken != nil {
 		s.zLog.Debug("Error while parsing token", zap.Any("error", errToken), zap.String("trace-id:", c.GetHeader("trace-id")))
-		c.Status(400)
+		common.ErrorResponse(c, 400, ErrorInvalidJwt, "Invalid token", c.GetHeader("trace-id"))
 		return
 	}
 	client := tokenParsed["sub"].(string)
@@ -161,16 +159,16 @@ func (s NotificationService) GetNotificationSubscribe(c *gin.Context) {
 		if err != nil {
 			s.zLog.Error("Error while assigning service ID to client", zap.String("trace-id:", c.GetHeader("trace-id")), zap.Any("error", err))
 			s.sessions[client] = nil
-			c.Status(500)
+			common.ErrorResponse(c, 500, ErrorInternalServerError, "Internal Server Error", c.GetHeader("trace-id"))
 			return
 		}
 	} else if s.operationMode == commonmodel.UserQueue {
 		//Subscribe to the user queue
-		errSubscribe := s.sqs.ReceiveMessage(&sessionClosed, &s.receiveMessage, getUserQueueUrl(*s.userQueueBaseUrl, client), 15)
+		errSubscribe := s.sqs.ReceiveNotification(&sessionClosed, &s.receiveMessage, getUserQueueUrl(*s.userQueueBaseUrl, client), 15)
 		if errSubscribe != nil {
 			s.zLog.Error("Error while subscribing to the queue", zap.Any("error", errSubscribe))
 			s.sessions[client] = nil
-			c.Status(500)
+			common.ErrorResponse(c, 500, ErrorInternalServerError, "Internal Server Error", c.GetHeader("trace-id"))
 			return
 		}
 	}
@@ -189,15 +187,15 @@ func (s NotificationService) GetNotificationSubscribe(c *gin.Context) {
 	}()
 
 	//Start listening events and also monitor the closeNotify channel
-	for {
-	selectLoop:
+	stop := false
+	for !stop {
 		select {
 		case <-closeNotify:
 			s.zLog.Debug("HTTP connection just closed", zap.String("trace-id:", c.GetHeader("trace-id")))
-			break selectLoop
+			stop = true
 		case <-timeoutChannel:
 			s.zLog.Debug("Connection timed out", zap.String("trace-id:", c.GetHeader("trace-id")))
-			break selectLoop
+			stop = true
 		case sessionMessage := <-sessionChannel:
 			s.zLog.Debug("Sending message to client", zap.String("trace-id:", c.GetHeader("trace-id")), zap.Any("message", sessionMessage))
 			_, err := c.Writer.WriteString(sessionMessage)
@@ -207,6 +205,7 @@ func (s NotificationService) GetNotificationSubscribe(c *gin.Context) {
 			c.Writer.Flush()
 		}
 	}
+	s.zLog.Debug("Cleaning up after connection", zap.String("trace-id:", c.GetHeader("trace-id")))
 	if s.operationMode == commonmodel.ServiceInstanceQueue {
 		err := s.d.UpdateClientServiceIdToNull(client)
 		if err != nil {
@@ -217,8 +216,10 @@ func (s NotificationService) GetNotificationSubscribe(c *gin.Context) {
 	}
 	close(sessionChannel)
 	delete(s.sessions, client)
+	c.JSON(288, nil)
 }
 
+// getUserQueueUrl returns the URL of the user queue for the given user
 func getUserQueueUrl(baseUrl, userId string) (queueUrl *string) {
 	return common.GetStringPointer(baseUrl + "-" + userId)
 }

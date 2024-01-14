@@ -7,6 +7,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"go.uber.org/zap"
 	commonmodel "notification-service/common/common-model"
+	"notification-service/model"
 	"reflect"
 	"strconv"
 )
@@ -22,11 +23,14 @@ type SqsService struct {
 
 type SqsServiceInterface interface {
 	SendMessageToQueue(queueUrl string, message string, messageAttributes *map[string]interface{}) (messageId *string, err error)
+	SendNotificationToQueue(meta model.NotificationMeta) (messageId *string, err error)
 	ReceiveMessage(done *chan interface{}, c *chan sqs.Message, queueUrl *string, visibilityTimeout int64) (err error)
+	ReceiveNotification(done *chan interface{}, c *chan model.NotificationMeta, queueUrl *string, visibilityTimeout int64) (err error)
 	CreateMessageQueue(queueName string, delaySeconds, retentionPeriodSeconds, maxReceiveCount *int, deadLetterQueueArn *string) (queueUrl *string, err error)
 	DeleteMessage(queueUrl string, receiptHandle string) (err error)
 }
 
+// NewSqsService is a factory function that creates a new SqsService instance
 func NewSqsService(logger *zap.Logger) (sqsService *SqsService) {
 	sess := session.Must(session.NewSessionWithOptions(session.Options{
 		SharedConfigState: session.SharedConfigEnable}))
@@ -38,6 +42,9 @@ func NewSqsService(logger *zap.Logger) (sqsService *SqsService) {
 	}
 }
 
+// SendMessageToQueue sends a message to the given SQS queue
+// It performs basic validation on the provided arguments and returns an error if the message is too long or the queue name is too short
+// An case of successful message sending, it returns the message id
 func (s *SqsService) SendMessageToQueue(queueUrl string, message string, messageAttributes *map[string]interface{}) (messageId *string, err error) {
 	if len(queueUrl) < 5 || len(message) < 5 {
 		s.log.Error("Queue name or message is too short", zap.String("queueUrl", queueUrl), zap.String("message", message))
@@ -84,6 +91,23 @@ func (s *SqsService) SendMessageToQueue(queueUrl string, message string, message
 	return result.MessageId, nil
 }
 
+// SendNotificationToQueue sends a notification to the given SQS queue
+// It calls SendMessageToQueue internally, therefore performs basic validation on the provided arguments and returns an error if the message is too long or the queue name is too short
+// An case of successful message sending, it returns the message id
+func (s *SqsService) SendNotificationToQueue(meta model.NotificationMeta) (messageId *string, err error) {
+	messageAttributes := map[string]interface{}{
+		"id":        meta.Notification.Id,
+		"addressee": meta.Notification.Addressee,
+		"subject":   meta.Notification.Subject,
+	}
+	return s.SendMessageToQueue(meta.QueueUrl, meta.Notification.Body, &messageAttributes)
+}
+
+// ReceiveMessage allows to receive messages from a given SQS queue
+// done is a channel that can be used to stop the receiving process (since the AWS SDK does not provide a way to stop the receiving process, it might take up to "maximum polling period" to stop)
+// c is the channel where the received messages are delivered to
+// queueUrl is the URL of the queue to receive messages from
+// visibilityTimeout is the maximum time the message is hidden from other consumers after it is received
 func (s *SqsService) ReceiveMessage(done *chan interface{}, c *chan sqs.Message, queueUrl *string, visibilityTimeout int64) (err error) {
 	if visibilityTimeout < 0 || visibilityTimeout > 43200 {
 		s.log.Error("Invalid visibility timeout", zap.Int64("visibilityTimeout", visibilityTimeout))
@@ -118,7 +142,11 @@ func (s *SqsService) ReceiveMessage(done *chan interface{}, c *chan sqs.Message,
 				s.log.Debug("Received message", zap.String("queueUrl", *queueUrl), zap.Any("quantity", len(msgResult.Messages)))
 				messages := msgResult.Messages
 				for _, message := range messages {
-					*c <- *message
+					if !*terminated {
+						*c <- *message
+					} else {
+						s.log.Debug("Message not processed, consumer channel closed", zap.String("queueUrl", *queueUrl), zap.Any("id", message.MessageId))
+					}
 				}
 			}
 		}
@@ -128,6 +156,45 @@ func (s *SqsService) ReceiveMessage(done *chan interface{}, c *chan sqs.Message,
 	return nil
 }
 
+// ReceiveNotification allows to receive notifications from a given SQS queue
+// done is a channel that can be used to stop the receiving process (since the AWS SDK does not provide a way to stop the receiving process, it might take up to "maximum polling period" to stop)
+// c is the channel where the received notifications are delivered to
+// queueUrl is the URL of the queue to receive messages from
+// visibilityTimeout is the maximum time the message is hidden from other consumers after it is received
+func (s *SqsService) ReceiveNotification(done *chan interface{}, c *chan model.NotificationMeta, queueUrl *string, visibilityTimeout int64) (err error) {
+	sqsMessageChannel := make(chan sqs.Message)
+	internalDone := make(chan interface{})
+	err = s.ReceiveMessage(&internalDone, &sqsMessageChannel, queueUrl, visibilityTimeout)
+	if err != nil {
+		return err
+	}
+	go func(c *chan model.NotificationMeta, queueUrl *string, visibilityTimeout int64) {
+		for {
+			select {
+			case <-*done:
+				internalDone <- nil
+				close(internalDone)
+				close(sqsMessageChannel)
+				return //Stop the loop
+			case message := <-sqsMessageChannel:
+				s.log.Debug("Received message", zap.String("queueUrl", *queueUrl), zap.Any("message", message))
+				notification, err := model.CreateNotification(message)
+				if err != nil {
+					s.log.Error("Invalid notification received... Removing from queue", zap.String("queueUrl", *queueUrl), zap.String("message", message.GoString()), zap.Any("error", err))
+					err := s.DeleteMessage(*queueUrl, *message.ReceiptHandle)
+					if err != nil {
+						s.log.Error("Error while deleting message", zap.String("queueUrl", *queueUrl), zap.String("message", message.GoString()), zap.Any("error", err))
+					}
+					continue
+				}
+				*c <- model.CreateNotificationMeta(notification, *message.ReceiptHandle, *queueUrl)
+			}
+		}
+	}(c, queueUrl, visibilityTimeout)
+	return nil
+}
+
+// CreateMessageQueue creates a new SQS queue with the given name and attributes
 func (s *SqsService) CreateMessageQueue(queueName string, delaySeconds, retentionPeriodSeconds, maxReceiveCount *int, deadLetterQueueArn *string) (queueUrl *string, err error) {
 	if len(queueName) < 5 {
 		s.log.Error("Queue name is too short", zap.String("queueName", queueName))
@@ -160,6 +227,9 @@ func (s *SqsService) CreateMessageQueue(queueName string, delaySeconds, retentio
 	return result.QueueUrl, nil
 }
 
+// DeleteMessage deletes a message from the given SQS queue
+// queueUrl is the URL of the queue to delete the message from
+// receiptHandle is the receipt handle of the message to delete
 func (s *SqsService) DeleteMessage(queueUrl string, receiptHandle string) (err error) {
 	_, err = s.sqs.DeleteMessage(&sqs.DeleteMessageInput{
 		QueueUrl:      &queueUrl,
@@ -169,5 +239,14 @@ func (s *SqsService) DeleteMessage(queueUrl string, receiptHandle string) (err e
 		s.log.Error("Error while deleting message", zap.String("queueUrl", queueUrl), zap.String("receiptHandle", receiptHandle), zap.Any("error", err))
 		return commonmodel.ErrSqsUnexpected
 	}
+	return nil
+}
+
+// validateSqsMessage validates the given message body
+func validateSqsMessage(message string) error {
+	if len(message) > MaxMessageBodySize {
+		return commonmodel.ErrContentTooLong
+	}
+	//TODO add valuation for characters
 	return nil
 }
